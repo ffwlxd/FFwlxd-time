@@ -8,38 +8,35 @@ import requests
 
 app = Flask(__name__)
 
-# File to store UIDs and their expiration times
-STORAGE_FILE = 'uid_storage.json'
+# GitHub raw URL to load UID storage JSON (read-only)
+GITHUB_UID_JSON_URL = 'https://raw.githubusercontent.com/ffwlxd/FFwlxd-time/main/uid_storage.json'
 
-# Lock for thread-safe access to the file
+# Local fallback file path for saving
+STORAGE_FILE = 'uid_storage_local.json'
+
+# Lock for thread-safe access
 storage_lock = threading.Lock()
 
-# Function to ensure the storage file exists
-def ensure_storage_file():
-    if not os.path.exists(STORAGE_FILE):
-        with open(STORAGE_FILE, 'w') as file:
-            json.dump({}, file)  # Create an empty JSON file
-
-# Function to load UIDs from the file safely
+# Function to load UIDs from GitHub (read-only)
 def load_uids():
-    ensure_storage_file()
-    with open(STORAGE_FILE, 'r') as file:
-        try:
-            content = file.read().strip()
-            if not content:
-                return {}
-            return json.loads(content)
-        except json.JSONDecodeError:
-            print("Warning: UID storage file is corrupted or empty.")
-            return {}
+    try:
+        response = requests.get(GITHUB_UID_JSON_URL)
+        response.raise_for_status()
+        content = response.text.strip()
+        return json.loads(content) if content else {}
+    except Exception as e:
+        print(f"Failed to load UID data from GitHub: {e}")
+        return {}
 
-# Function to save UIDs to the file
+# Function to save UIDs locally
 def save_uids(uids):
-    ensure_storage_file()
-    with open(STORAGE_FILE, 'w') as file:
-        json.dump(uids, file, default=str)
+    try:
+        with open(STORAGE_FILE, 'w') as file:
+            json.dump(uids, file, default=str)
+    except Exception as e:
+        print(f"Failed to save UIDs locally: {e}")
 
-# Function to periodically check and delete expired UIDs
+# Periodic cleanup of expired UIDs
 def cleanup_expired_uids():
     while True:
         with storage_lock:
@@ -56,11 +53,11 @@ def cleanup_expired_uids():
             save_uids(uids)
         time.sleep(1)
 
-# Start the cleanup thread
+# Start cleanup thread
 cleanup_thread = threading.Thread(target=cleanup_expired_uids, daemon=True)
 cleanup_thread.start()
 
-# API to add a UID with expiration or permanent
+# Add UID API
 @app.route('/add_uid', methods=['GET'])
 def add_uid():
     uid = request.args.get('uid')
@@ -71,7 +68,6 @@ def add_uid():
     if not uid:
         return jsonify({'error': 'Missing parameter: uid'}), 400
 
-    # Handle permanent UIDs
     if permanent:
         expiration_time = 'permanent'
         try:
@@ -86,15 +82,15 @@ def add_uid():
         except ValueError:
             return jsonify({'error': 'Invalid time value'}), 400
 
-        current_time = datetime.now()
+        now = datetime.now()
         if time_unit == 'days':
-            expiration_time = current_time + timedelta(days=time_value)
+            expiration_time = now + timedelta(days=time_value)
         elif time_unit == 'months':
-            expiration_time = current_time + timedelta(days=time_value * 30)
+            expiration_time = now + timedelta(days=time_value * 30)
         elif time_unit == 'years':
-            expiration_time = current_time + timedelta(days=time_value * 365)
+            expiration_time = now + timedelta(days=time_value * 365)
         elif time_unit == 'seconds':
-            expiration_time = current_time + timedelta(seconds=time_value)
+            expiration_time = now + timedelta(seconds=time_value)
         else:
             return jsonify({'error': 'Invalid type. Use "days", "months", "years", or "seconds".'}), 400
 
@@ -114,7 +110,7 @@ def add_uid():
         'expires_at': expiration_time if not permanent else 'never'
     })
 
-# API to check remaining time
+# Check time left for UID
 @app.route('/get_time/<string:uid>', methods=['GET'])
 def check_time(uid):
     with storage_lock:
@@ -123,7 +119,6 @@ def check_time(uid):
             return jsonify({'error': 'UID not found'}), 404
 
         expiration_time = uids[uid]
-
         if expiration_time == 'permanent':
             return jsonify({
                 'uid': uid,
@@ -132,15 +127,15 @@ def check_time(uid):
             })
 
         expiration_time = datetime.strptime(expiration_time, '%Y-%m-%d %H:%M:%S')
-        current_time = datetime.now()
+        now = datetime.now()
 
-        if current_time > expiration_time:
+        if now > expiration_time:
             return jsonify({'error': 'UID has expired'}), 400
 
-        remaining_time = expiration_time - current_time
-        days = remaining_time.days
-        hours, remainder = divmod(remaining_time.seconds, 3600)
-        minutes, seconds = divmod(remainder, 60)
+        remaining = expiration_time - now
+        days = remaining.days
+        hours, rem = divmod(remaining.seconds, 3600)
+        minutes, seconds = divmod(rem, 60)
 
         return jsonify({
             'uid': uid,
@@ -154,5 +149,4 @@ def check_time(uid):
 
 # Run Flask app
 if __name__ == '__main__':
-    ensure_storage_file()
     app.run(host='0.0.0.0', port=50022, debug=True)
